@@ -1,1 +1,6 @@
-*.json
+*
+!.gitignore
+api_backend/.env
+api_backend/storage/
+vendor/
+node_modules/

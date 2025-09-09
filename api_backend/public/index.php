@@ -1,55 +1,74 @@
 <?php
-// public/index.php
+declare(strict_types=1);
 
-// --- CORS básico para desarrollo ---
-$origin = $_SERVER['HTTP_ORIGIN'] ?? 'http://localhost:5173';
-header("Access-Control-Allow-Origin: $origin");
-header('Access-Control-Allow-Credentials: true');
-header('Access-Control-Allow-Headers: Content-Type, Authorization');
-header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+require __DIR__ . '/../src/bootstrap.php';
 
-// Preflight
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-  http_response_code(204);
-  exit;
+use App\Controllers\AuthController;
+use App\Controllers\ConfigController;
+use App\Controllers\WithdrawalController;
+use App\Controllers\NotificationController;
+use App\Controllers\FileController;
+use App\Controllers\CardsController;
+
+// Auth helpers
+function auth_user(): ?array {
+    $hdr = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+    if (!preg_match('/Bearer\s+(.*)$/i', $hdr, $m)) return null;
+    try {
+        $claims = App\Utils\Jwt::decode(trim($m[1]));
+        return ['id' => (int)($claims['sub'] ?? 0), 'role' => $claims['role'] ?? 'user'];
+    } catch (\Throwable $e) {
+        return null;
+    }
+}
+function require_auth(): array {
+    $u = auth_user();
+    if (!$u) json_response(['error' => 'No autorizado'], 401);
+    return $u;
+}
+function require_admin(array $u): void {
+    if (($u['role'] ?? 'user') !== 'admin') json_response(['error' => 'Prohibido'], 403);
 }
 
-// JSON por defecto
-header('Content-Type: application/json; charset=utf-8');
+$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+$method = $_SERVER['REQUEST_METHOD'];
 
-// Normaliza path
-$uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
-$path = rtrim($uri, '/');
-
-// Permite tanto /api/... como ... sin prefijo
-$path = preg_replace('#^/api#', '', $path);
-
-// Rutas de prueba
-if ($path === '' || $path === '/') {
-  echo json_encode(['ok' => true, 'service' => 'Wallet API', 'ts' => time()]);
-  exit;
+// Servir archivos de /storage/*
+if (strpos($path, '/storage/') === 0) {
+    $file = __DIR__ . '/../' . ltrim($path, '/');
+    if (is_file($file)) {
+        $mime = mime_content_type($file);
+        header('Content-Type: ' . $mime);
+        readfile($file);
+        exit;
+    } else {
+        http_response_code(404);
+        exit;
+    }
 }
 
-if ($path === '/health') {
-  echo json_encode(['status' => 'ok']);
-  exit;
-}
+// Rutas
+if ($path === '/auth/register' && $method === 'POST') { AuthController::register(json_input()); }
+if ($path === '/auth/login' && $method === 'POST') { AuthController::login(json_input()); }
+if ($path === '/auth/me' && $method === 'GET') { $u = require_auth(); AuthController::me($u['id']); }
+if ($path === '/auth/refresh' && $method === 'POST') { AuthController::refresh(); }
+if ($path === '/auth/logout' && $method === 'POST') { AuthController::logout(); }
+if ($path === '/_seed_admin' && $method === 'POST') { AuthController::seedAdmin(); }
 
-// LISTAR HISTORIAL (provisorio, solo para comprobar conectividad)
-if ($path === '/list' && $_SERVER['REQUEST_METHOD'] === 'GET') {
-  $email = $_GET['email'] ?? '';
-  // TODO: aquí llamarás a DB real. Por ahora responde estructura válida:
-  echo json_encode([
-    'email' => $email,
-    'items' => [
-      ['code'=>'RW-AB12CD', 'provider'=>'paypal',  'amount'=>250,  'currency'=>'USD', 'status'=>'PAID',      'created_at'=>date('c', time()-86400)],
-      ['code'=>'RW-XY34ZT', 'provider'=>'binance', 'amount'=>500,  'currency'=>'USD', 'status'=>'PENDING',   'created_at'=>date('c', time()-3600)],
-      ['code'=>'RW-QW56ER', 'provider'=>'facebook','amount'=>-75.5,'currency'=>'USD', 'status'=>'REJECTED',  'created_at'=>date('c', time()-172800)],
-    ]
-  ]);
-  exit;
-}
+if ($path === '/config' && $method === 'GET') { require_auth(); ConfigController::get(); }
+if ($path === '/config' && $method === 'PATCH') { $u = require_auth(); require_admin($u); ConfigController::patch(json_input()); }
+
+if ($path === '/withdrawals' && $method === 'GET') { $u = require_auth(); WithdrawalController::list($u['id'], $_GET, $u['role']==='admin'); }
+if ($path === '/withdrawals' && $method === 'POST') { $u = require_auth(); WithdrawalController::create($u['id'], json_input()); }
+if (preg_match('#^/withdrawals/(\d+)$#', $path, $m) && $method === 'PATCH') { $u = require_auth(); require_admin($u); WithdrawalController::updateStatus($u['id'], (int)$m[1], json_input()); }
+
+if ($path === '/notifications' && $method === 'GET') { $u = require_auth(); NotificationController::list($u['id']); }
+if (preg_match('#^/notifications/(\d+)/read$#', $path, $m) && $method === 'PATCH') { $u = require_auth(); NotificationController::markRead($u['id'], (int)$m[1]); }
+
+if ($path === '/files/qr' && $method === 'POST') { $u = require_auth(); FileController::uploadQr($u['id']); }
+
+if ($path === '/cards' && $method === 'GET') { $u = require_auth(); CardsController::list($u['id']); }
+if ($path === '/cards' && $method === 'POST') { $u = require_auth(); CardsController::create($u['id']); }
 
 // 404
-http_response_code(404);
-echo json_encode(['error' => 'Not found', 'path' => $path]);
+json_response(['error' => 'Ruta no encontrada'], 404);

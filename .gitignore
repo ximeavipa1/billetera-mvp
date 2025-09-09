@@ -1,0 +1,10 @@
+.env
+*.env
+*.log
+.DS_Store
+api_backend/.env
+api_backend/storage/
+vendor
+wallet/node_modules/
+node_modules/
+dist/

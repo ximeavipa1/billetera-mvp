@@ -1,22 +1,24 @@
 // src/auth/session.js
-const LS_SESSION = 'wallet.session'
-const LS_USERS   = 'wallet.users'
+import { api, setAccessToken } from '../lib/apiClient';
 
-// Lista blanca para rol admin (demo)
-export const ADMIN_EMAILS = ['admin@demo.com']
-
-export const getUsers = () => {
-  try { return JSON.parse(localStorage.getItem(LS_USERS) || '[]') } catch { return [] }
+export async function register({ email, password, display_name }) {
+  const data = await api('/auth/register', { method: 'POST', body: { email, password, display_name } });
+  setAccessToken(data.access_token);
+  return data.user;
 }
-export const setUsers = (list) => localStorage.setItem(LS_USERS, JSON.stringify(list))
 
-export const getSession = () => {
-  try { return JSON.parse(localStorage.getItem(LS_SESSION) || 'null') } catch { return null }
+export async function login({ email, password }) {
+  const data = await api('/auth/login', { method: 'POST', body: { email, password } });
+  setAccessToken(data.access_token);
+  return data.user;
 }
-export const setSession = (s) => localStorage.setItem(LS_SESSION, JSON.stringify(s))
-export const clearSession = () => localStorage.removeItem(LS_SESSION)
 
-// Helper: decide rol a partir del correo
-export const roleForEmail = (email) => (
-  ADMIN_EMAILS.map(e=>e.toLowerCase()).includes((email||'').toLowerCase()) ? 'admin' : 'user'
-)
+export async function me() {
+  const data = await api('/auth/me');
+  return data.user;
+}
+
+export async function logout() {
+  await api('/auth/logout', { method: 'POST' });
+  setAccessToken(null);
+}
