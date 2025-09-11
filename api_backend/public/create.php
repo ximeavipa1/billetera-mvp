@@ -1,95 +1,122 @@
 <?php
-require_once __DIR__ . '/../src/lib/DB.php';
-require_once __DIR__ . '/../config/env.php';
-
-use Lib\DB;
-
-header('Content-Type: application/json; charset=utf-8');
-header('Access-Control-Allow-Origin: ' . CORS_ORIGIN);
-header('Access-Control-Allow-Methods: POST,OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type');
-
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') { http_response_code(405); echo json_encode(['ok'=>false,'error'=>'method not allowed']); exit; }
-
-$body = json_decode(file_get_contents('php://input'), true) ?: [];
-$email  = trim($body['email']  ?? '');
-$from   = trim($body['from']   ?? '');   // paypal | binance | usdt
-$to     = trim($body['to']     ?? '');   // BINANCE | BOB_QR | CARD (del front)
-$amount = (float)($body['amount'] ?? 0);
-$proof  = trim($body['proof']  ?? '');
-
-if ($email==='' || $from==='' || $to==='' || $amount<=0) {
-  http_response_code(400);
-  echo json_encode(['ok'=>false, 'error'=>'missing fields']); exit;
+// api_backend/public/create.php
+require_once __DIR__ . '/../src/bootstrap.php';
+require_once __DIR__ . '/../src/lib/JWT.php';
+if (is_file(__DIR__ . '/../config/env.php')) {
+  require_once __DIR__ . '/../config/env.php';
 }
 
-// Normalizamos destino: en BD dst es USDT/BOB_QR/CARD
-$dst = strtoupper($to);
-if ($dst === 'BINANCE') $dst = 'USDT';
+use function Lib\JWT\decode as jwt_decode;
+
+header('Content-Type: application/json; charset=utf-8');
+
+function jwt_secret(): string {
+  $fromEnv = env('JWT_SECRET', '');
+  if ($fromEnv !== '') return $fromEnv;
+  if (defined('APP_SECRET')) return APP_SECRET;
+  $fromApp = env('APP_SECRET', '');
+  return $fromApp !== '' ? $fromApp : 'change-me-super-secret';
+}
+
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+if ($method !== 'POST') {
+  http_response_code(405);
+  echo json_encode(['ok'=>false,'error'=>'method not allowed'], JSON_UNESCAPED_UNICODE);
+  exit;
+}
+
+$body = json_input();
+$from = trim((string)($body['from'] ?? ''));
+$to   = trim((string)($body['to'] ?? ''));
+$amt  = (float)($body['amount'] ?? 0);
+$cur  = strtoupper(trim((string)($body['currency'] ?? 'USD')));
+$tqr  = isset($body['target_qr']) ? trim((string)$body['target_qr']) : null;
+
+if ($from === '' || $to === '' || $amt <= 0 || $cur === '') {
+  http_response_code(422);
+  echo json_encode(['ok'=>false,'error'=>'missing fields (from, to, amount, currency)'], JSON_UNESCAPED_UNICODE);
+  exit;
+}
+
+// Email desde JWT, fallback a body.email
+$email = null;
+$auth = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+if ($auth && stripos($auth, 'Bearer ') === 0) {
+  $token = trim(substr($auth, 7));
+  if ($token !== '') {
+    $payload = jwt_decode($token, jwt_secret());
+    if (is_array($payload) && !empty($payload['email'])) {
+      $email = $payload['email'];
+    }
+  }
+}
+if (!$email) {
+  $email = isset($body['email']) ? trim((string)$body['email']) : null;
+}
+if (!$email) {
+  http_response_code(400);
+  echo json_encode(['ok'=>false,'error'=>'missing email (token or body)'], JSON_UNESCAPED_UNICODE);
+  exit;
+}
 
 try {
-  $pdo = DB::pdo();
-  $pdo->beginTransaction();
+  $pdo = db();
 
-  // 1) Resolver user_id por email
-  $st = $pdo->prepare("SELECT id FROM users WHERE email=? LIMIT 1");
-  $st->execute([$email]);
-  $user = $st->fetch();
-  if (!$user) {
-    // Debe existir el usuario; si quieres auto-crear en pruebas, descomenta:
-    // $st = $pdo->prepare("INSERT INTO users (email, password_hash, display_name, role) VALUES (?, 'dev', ?, 'user')");
-    // $name = explode('@',$email)[0];
-    // $st->execute([$email, $name]);
-    // $userId = (int)$pdo->lastInsertId();
-    // (recomendado) Si no existe, devolver error:
-    throw new \Exception('user not found: registra primero ese correo');
-  }
-  $userId = (int)$user['id'];
+  // Descubrir columnas reales de "requests"
+  $col = $pdo->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'requests'");
+  $col->execute();
+  $cols = array_map(fn($r) => $r['COLUMN_NAME'], $col->fetchAll());
 
-  // 2) Traer config del día
-  $conf = $pdo->query("SELECT usd_bob, usd_usdt, fees_json FROM config WHERE id=1")->fetch();
-  if (!$conf) throw new \Exception('config not found');
+  $hasUserId = in_array('user_id', $cols, true);
+  $hasEmail  = in_array('email', $cols, true);
+  $hasFrom   = in_array('from_provider', $cols, true);
+  $hasTo     = in_array('to_provider', $cols, true);
+  $hasAmt    = in_array('amount', $cols, true);
+  $hasCur    = in_array('currency', $cols, true);
+  $hasSts    = in_array('status', $cols, true);
+  $hasCat    = in_array('created_at', $cols, true);
+  $hasTqr    = in_array('target_qr', $cols, true);
 
-  $usd_bob = (float)$conf['usd_bob'];
-  $usd_usdt = (float)$conf['usd_usdt'];
-  $fees = json_decode($conf['fees_json'], true) ?: [];
+  $fields = [];
+  $params = [];
 
-  // Clave de fee, ej: "paypal->BOB_QR" o "paypal->USDT"
-  $feeKey = strtolower($from) . '->' . $dst;
-  $feePct = isset($fees[$feeKey]) ? (float)$fees[$feeKey] : 5.0;
-
-  // Rate según destino
-  $rate = ($dst === 'BOB_QR') ? $usd_bob : $usd_usdt;
-
-  // 3) calcular "receive_text"
-  $afterFee = $amount - ($amount * ($feePct/100));
-  if ($dst === 'BOB_QR') {
-    $recv = $afterFee * $rate;
-    $receiveText = number_format($recv, 2, '.', '') . ' Bs';
+  if ($hasEmail) {
+    $fields[] = 'email';
+    $params[] = $email;
+  } elseif ($hasUserId) {
+    // Buscar id del usuario por email
+    $u = $pdo->prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
+    $u->execute([$email]);
+    $row = $u->fetch();
+    if (!$row) {
+      http_response_code(404);
+      echo json_encode(['ok'=>false,'error'=>'user not found for email'], JSON_UNESCAPED_UNICODE);
+      exit;
+    }
+    $fields[] = 'user_id';
+    $params[] = (int)$row['id'];
   } else {
-    $recv = $afterFee * $rate;
-    $receiveText = number_format($recv, 2, '.', '') . ' USDT';
+    throw new Exception("La tabla 'requests' no tiene ni 'email' ni 'user_id'.");
   }
 
-  // 4) Insertar
-  $sql = "INSERT INTO withdrawals
-          (user_id, src, dst, amount_usd, fee_pct, rate, receive_text, proof_url, status)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')";
+  if ($hasFrom) { $fields[] = 'from_provider'; $params[] = $from; }
+  if ($hasTo)   { $fields[] = 'to_provider';   $params[] = $to; }
+  if ($hasAmt)  { $fields[] = 'amount';        $params[] = $amt; }
+  if ($hasCur)  { $fields[] = 'currency';      $params[] = $cur; }
+  if ($hasSts)  { $fields[] = 'status';        $params[] = 'pending'; }
+  if ($hasCat)  { $fields[] = 'created_at';    $params[] = date('Y-m-d H:i:s'); }
+  if ($hasTqr && $tqr !== null) { $fields[] = 'target_qr'; $params[] = $tqr; }
+
+  $placeholders = implode(',', array_fill(0, count($fields), '?'));
+  $columns = implode(',', $fields);
+  $sql = "INSERT INTO requests ($columns) VALUES ($placeholders)";
   $st = $pdo->prepare($sql);
-  $st->execute([$userId, strtolower($from), $dst, $amount, $feePct, $rate, $receiveText, $proof]);
+  $st->execute($params);
+
   $id = (int)$pdo->lastInsertId();
-
-  $pdo->commit();
-
-  echo json_encode([
-    'ok'=>true,
-    'id'=>$id,
-    'receive_text'=>$receiveText,
-    'status'=>'pending'
-  ]);
-} catch (\Throwable $e) {
-  if ($pdo?->inTransaction()) $pdo->rollBack();
+  echo json_encode(['ok'=>true, 'id'=>$id, 'status'=>'pending'], JSON_UNESCAPED_UNICODE);
+} catch (Throwable $e) {
   http_response_code(500);
-  echo json_encode(['ok'=>false, 'error'=>$e->getMessage()]);
+  echo json_encode(['ok'=>false, 'error'=>$e->getMessage()], JSON_UNESCAPED_UNICODE);
 }

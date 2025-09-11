@@ -1,59 +1,115 @@
 <?php
-require_once __DIR__ . '/../src/lib/DB.php';
-require_once __DIR__ . '/../config/env.php';
+// api_backend/public/list.php
+require_once __DIR__ . '/../src/bootstrap.php';
+require_once __DIR__ . '/../src/lib/JWT.php';
+if (is_file(__DIR__ . '/../config/env.php')) {
+  // por compatibilidad si usas APP_SECRET definido ahí
+  require_once __DIR__ . '/../config/env.php';
+}
 
-use Lib\DB;
+use function Lib\JWT\decode as jwt_decode;
 
 header('Content-Type: application/json; charset=utf-8');
-header('Access-Control-Allow-Origin: ' . CORS_ORIGIN);
-header('Access-Control-Allow-Methods: GET,OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type');
 
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
+// -------- Helper: obtener secreto JWT consistente con /login y /me ----------
+function jwt_secret(): string {
+  // Prioriza JWT_SECRET si existe, si no APP_SECRET (constante o env), si no fallback.
+  $fromEnv = env('JWT_SECRET', '');
+  if ($fromEnv !== '') return $fromEnv;
+  if (defined('APP_SECRET')) return APP_SECRET;
+  $fromApp = env('APP_SECRET', '');
+  return $fromApp !== '' ? $fromApp : 'change-me-super-secret';
+}
 
-$email = isset($_GET['email']) ? trim($_GET['email']) : '';
-if ($email === '') {
+// --------- 1) Email desde el JWT (Authorization: Bearer ...) ---------------
+$email = null;
+$auth = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+if ($auth && stripos($auth, 'Bearer ') === 0) {
+  $token = trim(substr($auth, 7));
+  if ($token !== '') {
+    $payload = jwt_decode($token, jwt_secret());
+    if (is_array($payload) && !empty($payload['email'])) {
+      $email = $payload['email'];
+    }
+  }
+}
+
+// --------- 2) Fallback: ?email= en querystring ------------------------------
+if (!$email) {
+  $email = $_GET['email'] ?? null;
+}
+
+if (!$email) {
   http_response_code(400);
-  echo json_encode(['ok'=>false,'error'=>'missing email']); exit;
+  echo json_encode(['ok'=>false,'error'=>'missing email'], JSON_UNESCAPED_UNICODE);
+  exit;
 }
 
 try {
-  $pdo = DB::pdo();
+  $pdo = db();
 
-  $sql = "SELECT w.id, w.src, w.dst, w.amount_usd, w.status, w.created_at
-          FROM withdrawals w
-          INNER JOIN users u ON u.id = w.user_id
-          WHERE u.email = ?
-          ORDER BY w.created_at DESC
-          LIMIT 200";
-  $st = $pdo->prepare($sql);
-  $st->execute([$email]);
-  $rows = $st->fetchAll();
+  // Descubrir columnas reales de "requests" para construir SELECT dinámico
+  $col = $pdo->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'requests'");
+  $col->execute();
+  $cols = array_map(fn($r) => $r['COLUMN_NAME'], $col->fetchAll());
 
-  // Adaptamos al shape que espera tu frontend
-  $items = array_map(function($r){
-    // map status BD -> UI
-    $status = $r['status'];
-    if ($status === 'pending')   $statusUI = 'EN_PROCESO';
-    elseif ($status === 'released') $statusUI = 'PAGADO';
-    else                          $statusUI = 'RECHAZADO';
+  // ¿Tiene relación por user_id? (lo más común)
+  $hasUserId = in_array('user_id', $cols, true);
+  $hasEmailCol = in_array('email', $cols, true);
 
-    // provider “bonito”
-    $dst = strtoupper($r['dst']); // USDT | BOB_QR | CARD
-    $src = strtolower($r['src']); // paypal | binance | usdt
+  // Campos opcionales
+  $hasFrom = in_array('from_provider', $cols, true);
+  $hasTo   = in_array('to_provider', $cols, true);
+  $hasAmt  = in_array('amount', $cols, true);
+  $hasCur  = in_array('currency', $cols, true);
+  $hasSts  = in_array('status', $cols, true);
+  $hasCAt  = in_array('created_at', $cols, true);
 
-    return [
-      'id'              => (int)$r['id'],
-      'wallet_provider' => $src . '->' . $dst,           // ej: paypal->BOB_QR
-      'amount'          => (float)$r['amount_usd'],
-      'currency'        => 'USD',
-      'status'          => $statusUI,
-      'created_at'      => $r['created_at'],
-    ];
-  }, $rows);
+  // Armar lista de columnas a seleccionar (si existen)
+  $fields = ["r.id"];
+  if ($hasFrom) $fields[] = "r.from_provider AS `from`";
+  if ($hasTo)   $fields[] = "r.to_provider AS `to`";
+  if ($hasAmt)  $fields[] = "r.amount";
+  if ($hasCur)  $fields[] = "r.currency";
+  if ($hasSts)  $fields[] = "r.status";
+  if ($hasCAt)  $fields[] = "r.created_at";
 
-  echo json_encode(['ok'=>true, 'items'=>$items]);
-} catch (\Throwable $e) {
+  // Incluye email en la salida si existe en requests o por join
+  if ($hasEmailCol) {
+    $fields[] = "r.email";
+  } else {
+    $fields[] = "u.email";
+  }
+
+  $select = implode(",\n                 ", $fields);
+
+  if ($hasEmailCol) {
+    // Filtra directo por columna email en requests
+    $sql = "SELECT $select
+            FROM requests r
+            WHERE r.email = ?
+            ORDER BY r.id DESC
+            LIMIT 200";
+    $st = $pdo->prepare($sql);
+    $st->execute([$email]);
+  } elseif ($hasUserId) {
+    // Join con users si requests tiene user_id
+    $sql = "SELECT $select
+            FROM requests r
+            JOIN users u ON u.id = r.user_id
+            WHERE u.email = ?
+            ORDER BY r.id DESC
+            LIMIT 200";
+    $st = $pdo->prepare($sql);
+    $st->execute([$email]);
+  } else {
+    throw new Exception("La tabla 'requests' no tiene ni 'email' ni 'user_id' para filtrar.");
+  }
+
+  $items = $st->fetchAll();
+  echo json_encode(['ok'=>true, 'items'=>$items], JSON_UNESCAPED_UNICODE);
+} catch (Throwable $e) {
   http_response_code(500);
-  echo json_encode(['ok'=>false, 'error'=>$e->getMessage()]);
+  echo json_encode(['ok'=>false, 'error'=>$e->getMessage()], JSON_UNESCAPED_UNICODE);
 }
