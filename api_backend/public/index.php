@@ -53,6 +53,7 @@ if (strncmp($path, '/storage/', 9) === 0) {
 
 // ---- Rutas ----
 if ($path === '/' && $method === 'GET') { json_response(["ok"=>true,"service"=>"billetera-api","time"=>date("c")]); }
+if ($path === '/' && $method === 'GET') { json_response(["ok"=>true,"service"=>"billetera-api","time"=>date("c")]); }
 if ($path === '/auth/register' && $method === 'POST') { AuthController::register(json_input()); }
 if ($path === '/auth/login' && $method === 'POST') { AuthController::login(json_input()); }
 if ($path === '/auth/me' && $method === 'GET') { $u = require_auth(); AuthController::me($u['id']); }

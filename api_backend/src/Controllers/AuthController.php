@@ -57,6 +57,7 @@ class AuthController {
         $pdo->prepare('INSERT INTO sessions (id, user_id, token, expires_at, created_at) VALUES (UUID(), ?, ?, ?, NOW())')
             ->execute([$userId, $refreshToken, $expiresAt]);
 
+        // Corregido: pasar array con datos del usuario
         $access = Jwt::issue(['sub' => $userId, 'email' => $email, 'role' => $role], $accessTtl);
 
         $secure = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on';
@@ -92,6 +93,7 @@ class AuthController {
         if (strtotime($row['expires_at']) < time()) json_response(['error' => 'Refresh expirado'], 401);
 
         $accessTtl = (int)($_ENV['JWT_TTL_SECONDS'] ?? 900);
+        // Corregido: pasar array con datos del usuario
         $access = \App\Utils\Jwt::issue(['sub' => (int)$row['user_id'], 'email' => $row['email'], 'role' => $row['role']], $accessTtl);
         json_response(['access_token' => $access]);
     }
