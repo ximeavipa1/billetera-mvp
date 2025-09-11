@@ -5,7 +5,7 @@ require __DIR__ . '/../vendor/autoload.php';
 
 use Dotenv\Dotenv;
 
-// Carga variables desde .env si existe (sin fallar si falta)
+// Carga .env si existe (modo tolerante)
 $root = dirname(__DIR__);
 if (is_file($root.'/.env')) {
   $dotenv = Dotenv::createImmutable($root);
@@ -13,14 +13,14 @@ if (is_file($root.'/.env')) {
 }
 
 /**
- * ENV helper: lee primero de $_ENV (Dotenv) y si no, del entorno del proceso (getenv).
+ * Lee variables de entorno: primero $_ENV (Dotenv), luego getenv().
  */
 function env(string $key, ?string $default = null): ?string {
   $val = $_ENV[$key] ?? getenv($key);
   return ($val === false || $val === null) ? $default : $val;
 }
 
-/** Boolean helper para flags en .env (p.ej. APP_DEBUG=true). */
+/** Convierte flags tipo "true/1/on/yes" a booleano. */
 function envBool(string $key, bool $default = false): bool {
   $v = strtolower((string)(env($key, $default ? 'true' : 'false')));
   return in_array($v, ['1','true','on','yes'], true);
@@ -31,13 +31,13 @@ if (PHP_SAPI === 'cli' && !isset($_SERVER['REQUEST_METHOD'])) {
   $_SERVER['REQUEST_METHOD'] = 'CLI';
 }
 
-// Error reporting
+// Error reporting según APP_DEBUG
 $debug = envBool('APP_DEBUG', false);
 ini_set('display_errors', $debug ? '1' : '0');
 error_reporting($debug ? E_ALL : (E_ALL & ~E_NOTICE & ~E_DEPRECATED));
 
 /**
- * Conexión DB (PDO MySQL)
+ * Conexión PDO MySQL singleton.
  */
 function db(): PDO {
   static $pdo = null;
@@ -57,39 +57,34 @@ function db(): PDO {
   return $pdo;
 }
 
-/**
- * CORS
- * - Soporta CORS_ALLOWED_ORIGINS (CSV) o CORS_ORIGIN (uno solo).
- * - Toma valores de .env o variables exportadas en shell.
- * - Responde correctamente a preflight (OPTIONS).
- */
+// CORS (bloque solicitado, tal cual)
 function cors(): void {
-  $reqMethod = $_SERVER['REQUEST_METHOD'] ?? '';
-  $origin    = $_SERVER['HTTP_ORIGIN']     ?? '';
+    $allowed = array_values(array_filter(array_map('trim', explode(',', $_ENV['CORS_ALLOWED_ORIGINS'] ?? ''))));
+    $origin  = $_SERVER['HTTP_ORIGIN'] ?? '';
 
-  $allowedCsv = env('CORS_ALLOWED_ORIGINS', env('CORS_ORIGIN', '')); // e.g. "https://a.com,https://b.com" o "*"
-  $allowed    = array_filter(array_map('trim', explode(',', (string)$allowedCsv)));
-  $allowAny   = ($allowedCsv === '*');
+    $allowAll = (count($allowed) === 1 && $allowed[0] === '*');
 
-  if ($origin && ($allowAny || in_array($origin, $allowed, true))) {
-    header('Access-Control-Allow-Origin: ' . ($allowAny ? '*' : $origin));
-    header('Vary: Origin');
-    // Credenciales solo si no es wildcard
-    header('Access-Control-Allow-Credentials: ' . ($allowAny ? 'false' : 'true'));
-  }
+    if ($allowAll && !$origin) {
+        // Sin origin: permite * (sin credenciales)
+        header('Access-Control-Allow-Origin: *');
+    } elseif ($origin && ($allowAll || in_array($origin, $allowed, true))) {
+        header('Access-Control-Allow-Origin: ' . $origin);
+        header('Vary: Origin');
+        header('Access-Control-Allow-Credentials: true');
+    }
 
-  header('Access-Control-Allow-Headers: Content-Type, Authorization, X-CSRF');
-  header('Access-Control-Allow-Methods: GET, POST, PATCH, PUT, DELETE, OPTIONS');
+    header('Access-Control-Allow-Headers: Content-Type, Authorization, X-CSRF');
+    header('Access-Control-Allow-Methods: GET, POST, PATCH, PUT, DELETE, OPTIONS');
 
-  if ($reqMethod === 'OPTIONS') {
-    http_response_code(204);
-    exit;
-  }
+    if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
+        http_response_code(204);
+        exit;
+    }
 }
 cors();
 
 /**
- * JSON helpers
+ * JSON helpers.
  */
 function json_input(): array {
   $input = file_get_contents('php://input');
