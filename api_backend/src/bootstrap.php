@@ -1,50 +1,44 @@
 <?php
 declare(strict_types=1);
 
-// --- Autoload & .env ---
 require __DIR__ . '/../vendor/autoload.php';
 
 use Dotenv\Dotenv;
 
-// Carga .env (sin romper si falta)
+// Carga variables desde .env si existe (sin fallar si falta)
 $root = dirname(__DIR__);
 if (is_file($root.'/.env')) {
   $dotenv = Dotenv::createImmutable($root);
   $dotenv->safeLoad();
 }
 
-// --- Helpers de ENV (soporta comentarios inline con # y valores por defecto) ---
-function env(string $key, $default = null): ?string {
-  $val = $_ENV[$key] ?? $_SERVER[$key] ?? getenv($key);
-  if ($val === false || $val === null) return $default;
-  $val = trim((string)$val);
-
-  // Quitar comentario inline:  VALOR  # comentario
-  // (si necesitas # dentro del valor, envuélvelo entre comillas en .env)
-  if (strpos($val, '#') !== false) {
-    // corta en el primer " #"
-    $parts = preg_split('/\s+#/', $val, 2);
-    $val = trim($parts[0]);
-  }
-  return $val;
+/**
+ * ENV helper: lee primero de $_ENV (Dotenv) y si no, del entorno del proceso (getenv).
+ */
+function env(string $key, ?string $default = null): ?string {
+  $val = $_ENV[$key] ?? getenv($key);
+  return ($val === false || $val === null) ? $default : $val;
 }
 
+/** Boolean helper para flags en .env (p.ej. APP_DEBUG=true). */
 function envBool(string $key, bool $default = false): bool {
   $v = strtolower((string)(env($key, $default ? 'true' : 'false')));
   return in_array($v, ['1','true','on','yes'], true);
 }
 
-// --- Compatibilidad CLI: REQUEST_METHOD no existe en CLI ---
+// Compatibilidad CLI: REQUEST_METHOD puede no existir
 if (PHP_SAPI === 'cli' && !isset($_SERVER['REQUEST_METHOD'])) {
   $_SERVER['REQUEST_METHOD'] = 'CLI';
 }
 
-// --- Error reporting ---
+// Error reporting
 $debug = envBool('APP_DEBUG', false);
 ini_set('display_errors', $debug ? '1' : '0');
 error_reporting($debug ? E_ALL : (E_ALL & ~E_NOTICE & ~E_DEPRECATED));
 
-// --- DB connection (PDO MySQL) ---
+/**
+ * Conexión DB (PDO MySQL)
+ */
 function db(): PDO {
   static $pdo = null;
   if ($pdo === null) {
@@ -63,44 +57,40 @@ function db(): PDO {
   return $pdo;
 }
 
-// --- CORS ---
+/**
+ * CORS
+ * - Soporta CORS_ALLOWED_ORIGINS (CSV) o CORS_ORIGIN (uno solo).
+ * - Toma valores de .env o variables exportadas en shell.
+ * - Responde correctamente a preflight (OPTIONS).
+ */
 function cors(): void {
-  // Sólo aplica en entorno web (no CLI)
-  if (PHP_SAPI === 'cli') return;
+  $reqMethod = $_SERVER['REQUEST_METHOD'] ?? '';
+  $origin    = $_SERVER['HTTP_ORIGIN']     ?? '';
 
-  // Orígenes permitidos (coma-separados). También aceptamos APP_URL por conveniencia.
-  $allowedList = array_filter(array_map('trim', explode(',', (string)env('CORS_ALLOWED_ORIGINS', ''))));
-  $appUrl = rtrim((string)env('APP_URL', ''), '/');
-  if ($appUrl) $allowedList[] = $appUrl;
+  $allowedCsv = env('CORS_ALLOWED_ORIGINS', env('CORS_ORIGIN', '')); // e.g. "https://a.com,https://b.com" o "*"
+  $allowed    = array_filter(array_map('trim', explode(',', (string)$allowedCsv)));
+  $allowAny   = ($allowedCsv === '*');
 
-  // Normalizar (quitar / final)
-  $allowedList = array_map(fn($s) => rtrim($s, '/'), $allowedList);
-
-  $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-  $originNorm = rtrim($origin, '/');
-
-  // Si el origin exacto está permitido, reflejarlo; si '*' está en la lista, permitir todos
-  $allowAll = in_array('*', $allowedList, true);
-  if ($allowAll || ($origin && in_array($originNorm, $allowedList, true))) {
-    header('Access-Control-Allow-Origin: ' . ($allowAll ? '*' : $origin));
-    if (!$allowAll) header('Vary: Origin');
-    header('Access-Control-Allow-Credentials: true');
+  if ($origin && ($allowAny || in_array($origin, $allowed, true))) {
+    header('Access-Control-Allow-Origin: ' . ($allowAny ? '*' : $origin));
+    header('Vary: Origin');
+    // Credenciales solo si no es wildcard
+    header('Access-Control-Allow-Credentials: ' . ($allowAny ? 'false' : 'true'));
   }
 
   header('Access-Control-Allow-Headers: Content-Type, Authorization, X-CSRF');
   header('Access-Control-Allow-Methods: GET, POST, PATCH, PUT, DELETE, OPTIONS');
 
-  $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-  if ($method === 'OPTIONS') {
+  if ($reqMethod === 'OPTIONS') {
     http_response_code(204);
     exit;
   }
 }
-
-// Llamar CORS sólo en peticiones web
 cors();
 
-// --- JSON helpers ---
+/**
+ * JSON helpers
+ */
 function json_input(): array {
   $input = file_get_contents('php://input');
   return $input ? (json_decode($input, true) ?: []) : [];

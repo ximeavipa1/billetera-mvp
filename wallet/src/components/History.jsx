@@ -1,83 +1,89 @@
 // src/components/History.jsx
 import { useState, useCallback, useEffect } from 'react'
-import { API_BASE } from '../App'
+import { api } from '../lib/api'
 
-// formatea fecha local
+/**
+ * Formatea un timestamp ISO a fecha/hora local legible.
+ */
 const fmtDate = (iso) =>
   new Date(iso).toLocaleString(undefined, {
-    year:'numeric', month:'numeric', day:'numeric',
-    hour:'numeric', minute:'2-digit', second:'2-digit'
+    year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', second: '2-digit'
   })
 
-// mapea estado a etiqueta en inglés que se muestra
+/**
+ * Traduce estados internos a etiquetas en inglés mostradas en UI.
+ */
 const label = (s) =>
   s === 'PAGADO'     ? 'Completed' :
   s === 'EN_PROCESO' ? 'Pending'   :
   s === 'RECHAZADO'  ? 'Rejected'  : s
 
-// normaliza un ítem cualquiera del backend a la forma que usa la UI
+/**
+ * Convierte un registro crudo del backend al formato que la UI espera.
+ */
 function normalizeItem(raw){
-  // campos tolerantes (por si cambian keys)
   const provider = raw.wallet_provider || raw.provider || raw.source || '—'
   const amount   = Number(raw.amount ?? 0)
   const created  = raw.created_at || raw.createdAt || raw.date || new Date().toISOString()
 
-  // estado → español que usa el UI
+  // Normaliza estados a español interno de la app
   let s = (raw.status || '').toString().toUpperCase()
   if (s === 'PAID' || s === 'COMPLETED' || s === 'APPROVED' || s === 'RELEASED') s = 'PAGADO'
   else if (s === 'PENDING' || s === 'EN PROCESO' || s === 'PROCESSING')          s = 'EN_PROCESO'
   else if (s === 'REJECTED' || s === 'CANCELLED' || s === 'CANCELED')            s = 'RECHAZADO'
   else if (!s) s = 'EN_PROCESO'
 
-  return {
-    wallet_provider: provider,
-    amount,
-    status: s,
-    created_at: created,
-  }
+  return { wallet_provider: provider, amount, status: s, created_at: created }
+}
+
+/**
+ * Lectura segura de la sesión persistida por Login.jsx
+ * Espera un objeto { token, email, role, ... }
+ */
+function getSession(){
+  try { return JSON.parse(localStorage.getItem('wallet.session') || 'null') } catch { return null }
 }
 
 export default function History(){
-  const [email, setEmail]     = useState('user@mail.com')
+  // Carga email desde sesión; si no hay, deja vacío y permite escribirlo (útil en dev)
+  const ses = getSession()
+  const isAdmin = ses?.role === 'admin'
+  const defaultEmail = ses?.email || ''
+  const [email, setEmail]     = useState(defaultEmail)
   const [items, setItems]     = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState('')
 
+  /**
+   * Consulta historial:
+   * - Tu backend actual requiere ?email=... incluso con JWT.
+   * - Si en el futuro el backend acepta JWT sin email, bastará con llamar api.list() sin query.
+   */
   const load = useCallback(async ()=>{
-    const q = email.trim()
-    if(!q) return
+    const q = (email || '').trim()
+    if (!q) {
+      setItems([])
+      setError('Ingresa un email válido.')
+      return
+    }
+
     setLoading(true)
     setError('')
-    const ac = new AbortController()
-
     try{
-      // 1) intenta router nuevo: /api/list?email=...
-      let r = await fetch(`${API_BASE}/list?email=${encodeURIComponent(q)}`, { signal: ac.signal })
-      // si 404, intenta el script legacy
-      if (r.status === 404){
-        r = await fetch(`${API_BASE}/list.php?email=${encodeURIComponent(q)}`, { signal: ac.signal })
-      }
-      if (!r.ok){
-        throw new Error(`HTTP ${r.status}`)
-      }
-      const data = await r.json()
-
-      // soporta varios formatos:
-      // { ok:true, items:[...] }  ||  { items:[...] }  ||  [ ... ]
+      const data = await api.list(q)            // ← usa VITE_API_BASE y Bearer token
       const rawItems = Array.isArray(data) ? data : (data.items || [])
-      const normalized = rawItems.map(normalizeItem)
-      setItems(normalized)
+      setItems(rawItems.map(normalizeItem))
     }catch(e){
       console.error('History load error:', e)
       setItems([])
-      setError('No se pudo obtener el historial por ahora.')
+      setError(e?.message || 'No se pudo obtener el historial.')
     }finally{
       setLoading(false)
     }
-
-    return ()=>ac.abort()
   }, [email])
 
+  // Carga inicial (y si cambia el email por el usuario/admin)
   useEffect(()=>{ load() }, [load])
 
   return (
@@ -87,6 +93,7 @@ export default function History(){
         <h5 className="mb-0">Historial de Transacciones</h5>
       </div>
 
+      {/* Para admin: input editable; para no-admin: input bloqueado con su propio email */}
       <div className="row g-2 align-items-end mb-3">
         <div className="col-12">
           <input
@@ -95,11 +102,12 @@ export default function History(){
             value={email}
             onChange={e=>setEmail(e.target.value)}
             placeholder="user@mail.com"
+            disabled={!isAdmin && !!defaultEmail}
           />
         </div>
         <div className="col-12">
           <button className="btn btn-primary w-100 btn-pill" onClick={load} disabled={loading}>
-            {loading ? 'Cargando…' : 'Consultar'}
+            {loading ? 'Cargando…' : (isAdmin ? 'Consultar' : 'Refrescar')}
           </button>
         </div>
       </div>

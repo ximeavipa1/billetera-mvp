@@ -9,10 +9,9 @@ import AdminPanel from './components/AdminPanel'
 import Login from './components/Login'
 import Profile from './components/Profile'   
 
-// flags de demo
-export const API_BASE = 'http://localhost:8000';
-
-export const USE_MOCK = false;
+// Base de API desde variables de entorno (Vite)
+export const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '') || 'http://127.0.0.1:8081';
+export const USE_MOCK = String(import.meta.env.VITE_USE_MOCK || 'false') === 'true';
 
 // helper local: lectura segura de sesión
 const getSession = () => {
