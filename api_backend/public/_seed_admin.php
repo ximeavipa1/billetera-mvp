@@ -1,12 +1,12 @@
 <?php
 // api_backend/public/_seed_admin.php
-// 1️⃣ SEED de PRIMER ADMIN — ÚSALO UNA SOLA VEZ Y LUEGO BÓRRALO
-// Seguridad básica: requiere un token secreto por GET o POST (?token=XXXX)
-// Define este token en config/env.php como ADMIN_SEED_TOKEN
+// 1️⃣ SEED del PRIMER ADMIN — ÚSALO UNA SOLA VEZ Y LUEGO BÓRRALO
 
-require_once __DIR__ . '/../src/lib/bootstrap.php'; // carga env, DB/Auth/Repo, etc.
+require_once __DIR__ . '/../src/bootstrap.php';
+require_once __DIR__ . '/../config/env.php';
+require_once __DIR__ . '/../src/lib/DB.php';
 
-use Lib\Auth;
+use Lib\DB;
 
 $requiredToken = defined('ADMIN_SEED_TOKEN') ? ADMIN_SEED_TOKEN : null;
 $token = $_GET['token'] ?? $_POST['token'] ?? '';
@@ -17,10 +17,11 @@ if (!$requiredToken || !$token || !hash_equals($requiredToken, $token)) {
   exit;
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
   $email = trim($_POST['email'] ?? '');
-  $pass  = trim($_POST['password'] ?? '');
+  $pass  = (string)($_POST['password'] ?? '');
   $name  = trim($_POST['displayName'] ?? 'Administrator');
+  $reset = isset($_POST['reset']) && $_POST['reset'] === '1';
 
   if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($pass) < 8) {
     echo "Email inválido o contraseña muy corta (min 8).";
@@ -28,19 +29,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   }
 
   try {
-    // crea usuario normal si no existe y eleva a admin
-    $user = Auth::findByEmail($email);
-    if (!$user) {
-      $userId = Auth::register($email, $pass, $name); // implementa hash con password_hash()
-    } else {
-      $userId = $user['id'];
-      // opcional: reset clave si quieres
-      // Auth::setPassword($userId, $pass);
-    }
-    Auth::setRole($userId, 'admin'); // implementa UPDATE users SET role='admin' WHERE id=?
+    $pdo = DB::pdo();
+    $pdo->beginTransaction();
 
+    // ¿Existe ya?
+    $st = $pdo->prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
+    $st->execute([$email]);
+    $row = $st->fetch();
+
+    if (!$row) {
+      // Crear directamente como admin
+      $hash = password_hash($pass, PASSWORD_DEFAULT);
+      $ins = $pdo->prepare('INSERT INTO users (email, password_hash, display_name, role) VALUES (?,?,?, "admin")');
+      $ins->execute([$email, $hash, $name ?: null]);
+      $userId = (int)$pdo->lastInsertId();
+    } else {
+      $userId = (int)$row['id'];
+
+      if ($reset) {
+        $hash = password_hash($pass, PASSWORD_DEFAULT);
+        $upd = $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
+        $upd->execute([$hash, $userId]);
+      }
+
+      // Promover a admin
+      $upd2 = $pdo->prepare("UPDATE users SET role = 'admin' WHERE id = ?");
+      $upd2->execute([$userId]);
+    }
+
+    $pdo->commit();
     echo "OK: Usuario $email ahora es ADMIN. ✅ Elimina este archivo (_seed_admin.php) YA.";
   } catch (\Throwable $e) {
+    if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
     http_response_code(500);
     echo "Error: " . $e->getMessage();
   }
@@ -68,6 +88,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       <label>Nombre a mostrar</label><br>
       <input name="displayName" type="text" style="padding:8px; width:100%;" value="Administrator">
     </div>
+    <label style="display:block; margin-top:8px;">
+      <input type="checkbox" name="reset" value="1"> Si el usuario existe, <b>resetear contraseña</b>.
+    </label>
     <button style="margin-top:12px; padding:10px 16px;">Crear / Promover</button>
   </form>
 </body>

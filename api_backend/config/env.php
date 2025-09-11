@@ -1,24 +1,20 @@
 <?php
-// NUNCA imprimir nada en env.php (ni espacios antes de <?php)
 
-// CORS: origen del frontend en dev
-define('CORS_ORIGIN', 'http://localhost:5173');
+// Frontend permitido (ajusta en Codespaces/producción)
+define('CORS_ORIGIN', getenv('CORS_ORIGIN') ?: 'http://localhost:5173');
 
-// DB (ajústalo cuando subas a HostGator)
-define('DB_HOST', 'localhost');
-define('DB_NAME', 'cualquier_db');        // tu base actual
-define('DB_USER', 'root');                // en local, el que uses
-define('DB_PASS', 'amoryamista');                    // en local, el que uses
+// DB desde env vars con fallback local
+define('DB_HOST', getenv('DB_HOST') ?: 'localhost');
+define('DB_NAME', getenv('DB_NAME') ?: 'billetera');
+define('DB_USER', getenv('DB_USER') ?: 'root');
+define('DB_PASS', getenv('DB_PASS') ?: '');
 
-// Si quieres logs de errores en dev
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
+// Secreto de la app para firmar JWT (cámbialo en prod!)
+define('APP_SECRET', getenv('APP_SECRET') ?: 'change-me-super-secret');
 
-
-
-// === Producción (HostGator) — SOLO cuando subas ===
-// define('DB_HOST', 'localhost');
-// define('DB_NAME', 'retiros1_wallet_prod');
-// define('DB_USER', 'retiros1_wallet_user');
-// define('DB_PASS', 'contraA1221');
+// Logging de errores (solo DEV)
+if (getenv('APP_ENV') !== 'prod') {
+  ini_set('display_errors', 1);
+  ini_set('display_startup_errors', 1);
+  error_reporting(E_ALL);
+}
