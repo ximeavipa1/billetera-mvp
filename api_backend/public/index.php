@@ -1,80 +1,119 @@
 <?php
-declare(strict_types=1);
+require __DIR__ . '/cors.php';
+@include_once __DIR__ . '/../vendor/autoload.php';
 
-require __DIR__ . '/../src/bootstrap.php';
-
-use App\Controllers\AuthController;
 use App\Controllers\ConfigController;
-use App\Controllers\WithdrawalController;
-use App\Controllers\NotificationController;
-use App\Controllers\FileController;
-use App\Controllers\CardsController;
+use App\Controllers\ProfileController;
 
-// ---- Helpers de auth ----
-function auth_user(): ?array {
-    $hdr = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-    if (!preg_match('/Bearer\s+(.*)$/i', $hdr, $m)) return null;
-    try {
-        $claims = App\Utils\Jwt::decode(trim($m[1]));
-        return ['id' => (int)($claims['sub'] ?? 0), 'role' => $claims['role'] ?? 'user'];
-    } catch (\Throwable $e) {
-        return null;
+function json_response(int $code, array $payload): void {
+    header('Content-Type: application/json; charset=utf-8');
+    http_response_code($code);
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+}
+
+// Helpers JWT (HS256) sin dependencias
+function b64url(string $data): string {
+    return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+}
+function create_jwt(array $claims, string $secret): string {
+    $header = ['typ' => 'JWT', 'alg' => 'HS256'];
+    $segments = [ b64url(json_encode($header)), b64url(json_encode($claims)) ];
+    $sig = hash_hmac('sha256', implode('.', $segments), $secret, true);
+    $segments[] = b64url($sig);
+    return implode('.', $segments);
+}
+
+// Manejadores de errores (para no perder CORS)
+set_exception_handler(function (Throwable $e) {
+    json_response(500, ['ok' => false, 'error' => 'UnhandledException', 'message' => $e->getMessage()]);
+});
+set_error_handler(function ($severity, $message, $file, $line) {
+    json_response(500, ['ok' => false, 'error' => 'RuntimeError', 'message' => $message, 'at' => basename($file) . ':' . $line]);
+    return true;
+});
+register_shutdown_function(function () {
+    $err = error_get_last();
+    if ($err && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+        json_response(500, ['ok' => false, 'error' => 'FatalError', 'message' => $err['message']]);
     }
-}
-function require_auth(): array {
-    $u = auth_user();
-    if (!$u) json_response(['error' => 'No autorizado'], 401);
-    return $u;
-}
-function require_admin(array $u): void {
-    if (($u['role'] ?? 'user') !== 'admin') json_response(['error' => 'Prohibido'], 403);
-}
+});
 
-// ---- Normaliza REQUEST_URI (evita null y rutas como //config) ----
-$reqUri = $_SERVER['REQUEST_URI'] ?? '/';
-if (!is_string($reqUri) || $reqUri === '') { $reqUri = '/'; }
-$path = parse_url($reqUri, PHP_URL_PATH) ?? '/';
-$path = '/' . ltrim($path, '/'); // garantiza un solo slash al inicio
+$path = rtrim(parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH), '/');
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
-// ---- Servir archivos de /storage/* ----
-if (strncmp($path, '/storage/', 9) === 0) {
-    $file = __DIR__ . '/../' . ltrim($path, '/');
-    if (is_file($file)) {
-        $mime = mime_content_type($file);
-        header('Content-Type: ' . $mime);
-        readfile($file);
-        exit;
-    } else {
-        http_response_code(404);
-        exit;
+// /config (GET público, sin DB)
+if ($path === '/config' && $method === 'GET') {
+    try {
+        $ctrl = new ConfigController();
+        $config = $ctrl->get();
+        json_response(200, ['ok' => true, 'config' => $config]);
+    } catch (Throwable $e) {
+        if (method_exists(ConfigController::class, 'defaults')) {
+            json_response(200, ['ok' => true, 'source' => 'defaults', 'config' => ConfigController::defaults()]);
+        } else {
+            json_response(200, ['ok' => true, 'source' => 'defaults', 'config' => [
+                'service_name' => 'Billetera Digital',
+                'fiat_currency' => 'BOB',
+                'exchange_rate_bob_usd' => 6.86,
+                'fees' => ['paypal_pct' => 8, 'binance_pct' => 2],
+                'withdrawal' => ['min_bob' => 5],
+                'card' => ['price_usd' => 1, 'validity_days' => 30, 'stock' => 0],
+                'sources' => ['paypal','binance','facebook','tiktok'],
+            ]]);
+        }
     }
+    exit;
 }
 
-// ---- Rutas ----
-if ($path === '/' && $method === 'GET') { json_response(["ok"=>true,"service"=>"billetera-api","time"=>date("c")]); }
-if ($path === '/' && $method === 'GET') { json_response(["ok"=>true,"service"=>"billetera-api","time"=>date("c")]); }
-if ($path === '/auth/register' && $method === 'POST') { AuthController::register(json_input()); }
-if ($path === '/auth/login' && $method === 'POST') { AuthController::login(json_input()); }
-if ($path === '/auth/me' && $method === 'GET') { $u = require_auth(); AuthController::me($u['id']); }
-if ($path === '/auth/refresh' && $method === 'POST') { AuthController::refresh(); }
-if ($path === '/auth/logout' && $method === 'POST') { AuthController::logout(); }
-if ($path === '/_seed_admin' && $method === 'POST') { AuthController::seedAdmin(); }
+// /auth/dev-admin (POST) — SOLO DEV
+if ($path === '/auth/dev-admin' && $method === 'POST') {
+    $secret = getenv('JWT_SECRET') ?: 'dev-secret';
+    $now = time();
+    $claims = [
+        'iss' => 'billetera-mvp',
+        'sub' => 'dev-admin',
+        'uid' => 'dev-admin',
+        'role' => 'admin',
+        'iat' => $now,
+        'exp' => $now + 3600,
+        'env' => 'dev',
+    ];
+    $token = create_jwt($claims, $secret);
+    json_response(200, ['ok' => true, 'token' => $token, 'role' => 'admin', 'exp' => $claims['exp']]);
+    exit;
+}
 
-if ($path === '/config' && $method === 'GET') { require_auth(); ConfigController::get(); }
-if ($path === '/config' && $method === 'PATCH') { $u = require_auth(); require_admin($u); ConfigController::patch(json_input()); }
+// /profile (GET/POST) con Bearer
+if ($path === '/profile') {
+    $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+    if (!preg_match('#^Bearer\s+(.+)$#i', $auth, $m)) {
+        json_response(401, ['ok' => false, 'error' => 'Unauthorized']);
+        exit;
+    }
+    $token = $m[1];
+    $p = new ProfileController();
+    if ($method === 'GET') {
+        json_response(200, ['ok' => true, 'profile' => $p->get($token)]);
+        exit;
+    }
+    if ($method === 'POST') {
+        json_response(200, ['ok' => true, 'profile' => $p->update($token, $_POST, $_FILES)]);
+        exit;
+    }
+    json_response(405, ['ok' => false, 'error' => 'MethodNotAllowed']);
+    exit;
+}
 
-if ($path === '/withdrawals' && $method === 'GET') { $u = require_auth(); WithdrawalController::list($u['id'], $_GET, $u['role']==='admin'); }
-if ($path === '/withdrawals' && $method === 'POST') { $u = require_auth(); WithdrawalController::create($u['id'], json_input()); }
-if (preg_match('#^/withdrawals/(\d+)$#', $path, $m) && $method === 'PATCH') { $u = require_auth(); require_admin($u); WithdrawalController::updateStatus($u['id'], (int)$m[1], json_input()); }
+// Pasarela a endpoints legacy admin
+if ($path === '/admin/config') {
+    require __DIR__ . '/admin/config.php';
+    exit;
+}
+if ($path === '/admin/requests') {
+    require __DIR__ . '/admin/requests.php';
+    exit;
+}
 
-if ($path === '/notifications' && $method === 'GET') { $u = require_auth(); NotificationController::list($u['id']); }
-if (preg_match('#^/notifications/(\d+)/read$#', $path, $m) && $method === 'PATCH') { $u = require_auth(); NotificationController::markRead($u['id'], (int)$m[1]); }
-
-if ($path === '/files/qr' && $method === 'POST') { $u = require_auth(); FileController::uploadQr($u['id']); }
-
-if ($path === '/cards' && $method === 'GET') { $u = require_auth(); CardsController::list($u['id']); }
-if ($path === '/cards' && $method === 'POST') { $u = require_auth(); CardsController::create($u['id']); }
-
-// 404
-json_response(['error' => 'Ruta no encontrada'], 404);
+// 404 por defecto
+json_response(404, ['ok' => false, 'error' => 'NotFound', 'path' => $path]);
+exit;
